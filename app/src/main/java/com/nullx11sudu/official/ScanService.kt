@@ -21,6 +21,7 @@ class ScanService : Service() {
     private var projection: MediaProjection? = null
     private var bubble: View? = null
     private var guide: BoardView? = null
+    private var answerOverlay: BoardView? = null
     private var panel: View? = null
     private var reader: ImageReader? = null
     private var display: android.hardware.display.VirtualDisplay? = null
@@ -40,7 +41,7 @@ class ScanService : Service() {
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         manager.createNotificationChannel(NotificationChannel(channel, "Screen scan", NotificationManager.IMPORTANCE_LOW))
         val stop = PendingIntent.getService(this, 1, Intent(this, ScanService::class.java).setAction("stop"), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        val notification = Notification.Builder(this, channel).setSmallIcon(android.R.drawable.ic_menu_search)
+        val notification = Notification.Builder(this, channel).setSmallIcon(com.nullx11sudu.official.R.drawable.ic_nullx11)
             .setContentTitle("Nullx11Sudo is ready").setContentText("Tap bubble to align. Stop to end capture.")
             .setOngoing(true).addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stop).build()
         if (Build.VERSION.SDK_INT >= 29) startForeground(1, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
@@ -67,7 +68,7 @@ class ScanService : Service() {
         val button = TextView(this).apply {
             text = "✦"; textSize = 30f; gravity = Gravity.CENTER
             setTextColor(Color.WHITE); setBackgroundColor(0xFF176B66.toInt()); elevation = 10f
-            setOnClickListener { hideBubble(); showGuide() }
+            setOnClickListener { hideAnswerOverlay(); hideBubble(); showGuide() }
         }
         val p = params(56.dp, 56.dp).apply { gravity = Gravity.TOP or Gravity.START; x = 12.dp; y = 160.dp }
         button.setOnTouchListener(object : View.OnTouchListener {
@@ -85,7 +86,8 @@ class ScanService : Service() {
     private fun hideBubble() { bubble?.let { wm.removeView(it) }; bubble = null }
     private fun showGuide() {
         if (guide != null) return
-        val view = BoardView(this)
+        hideAnswerOverlay()
+        val view = BoardView(this, false)
         guide = view; wm.addView(view, params(-1, -1))
         val controls = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setPadding(16.dp, 10.dp, 16.dp, 10.dp)
@@ -106,7 +108,10 @@ class ScanService : Service() {
         fun action(label: String, click: () -> Unit) { actions.addView(Button(this).apply { text = label; textSize = 12f; setOnClickListener { click() } }, LinearLayout.LayoutParams(0, -2, 1f)) }
         action("Scan") { message = "Scanning…"; info.text = message; capture() }
         action("Clear") { board = IntArray(81); answer = null; message = "Cleared. Scan again."; info.text = message; view.invalidate() }
-        action("Hide") { closeGuide(); showBubble() }
+        action("Float") {
+            if (answer != null) { closeGuide(); showAnswerOverlay(); showBubble() }
+            else { message = "Correct the clues or rescan before floating an answer."; info.text = message }
+        }
         controls.addView(actions)
         val digits = LinearLayout(this)
         for (digit in 0..9) {
@@ -126,39 +131,62 @@ class ScanService : Service() {
         panel = controls
         wm.addView(controls, params(-1, -2).apply { gravity = Gravity.BOTTOM })
     }
+    private fun showAnswerOverlay() {
+        if (answer == null || answerOverlay != null) return
+        val view = BoardView(this, true)
+        answerOverlay = view
+        val p = params(-1, -1)
+        // Critical: the game receives all taps, even on a digit or empty overlay cell.
+        // Android 12+ permits cross-app pass-through only below the obscuring-opacity limit.
+        p.alpha = 0.8f
+        p.flags = p.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+        wm.addView(view, p)
+    }
+    private fun hideAnswerOverlay() { answerOverlay?.let { wm.removeView(it) }; answerOverlay = null }
     private fun closeGuide() { infoLabel = null; panel?.let { wm.removeView(it) }; panel = null; guide?.let { wm.removeView(it) }; guide = null }
     private fun boardRect(w: Int, h: Int): RectF {
         val side = min(w, h) * size
         val cx = centerX * w; val cy = centerY * h
         return RectF(cx - side / 2, cy - side / 2, cx + side / 2, cy + side / 2)
     }
-    private inner class BoardView(context: Context) : View(context) {
+    private inner class BoardView(context: Context, private val floatMode: Boolean) : View(context) {
         private val paint = Paint(3)
         private var downX = 0f; private var downY = 0f; private var dragging = false
         override fun onDraw(canvas: Canvas) {
-            canvas.drawColor(0x44000000)
+            if (!floatMode) canvas.drawColor(0x44000000)
             val rect = boardRect(width, height); val cell = rect.width() / 9
-            paint.style = Paint.Style.FILL; paint.color = 0xDD10191B.toInt(); canvas.drawRect(rect, paint)
-            for (i in 0..9) {
+            paint.style = Paint.Style.FILL
+            if (!floatMode) {
+                paint.color = 0xDD10191B.toInt(); canvas.drawRect(rect, paint)
+            }
+            if (!floatMode) for (i in 0..9) {
                 paint.color = if (i % 3 == 0) 0xFF80CBC4.toInt() else 0x667EAEA9
                 paint.strokeWidth = if (i % 3 == 0) 2.dp.toFloat() else 1f
                 canvas.drawLine(rect.left + i * cell, rect.top, rect.left + i * cell, rect.bottom, paint)
                 canvas.drawLine(rect.left, rect.top + i * cell, rect.right, rect.top + i * cell, paint)
             }
             paint.textAlign = Paint.Align.CENTER; paint.textSize = cell * 0.65f
-            if (selected >= 0) {
+            if (!floatMode && selected >= 0) {
                 paint.color = 0x664DB6AC
                 canvas.drawRect(rect.left + (selected % 9) * cell, rect.top + (selected / 9) * cell,
                     rect.left + (selected % 9 + 1) * cell, rect.top + (selected / 9 + 1) * cell, paint)
             }
             for (i in 0 until 81) {
+                if (floatMode && board[i] != 0) continue
                 val v = if (board[i] != 0) board[i] else answer?.get(i) ?: 0
                 if (v == 0) continue
-                paint.color = if (board[i] != 0) Color.WHITE else 0xFF80CBC4.toInt()
+                paint.color = if (!floatMode && board[i] != 0) Color.WHITE else 0xFF80CBC4.toInt()
+                if (floatMode) {
+                    paint.setShadowLayer(3.dp.toFloat(), 0f, 1.dp.toFloat(), Color.BLACK)
+                }
                 canvas.drawText(v.toString(), rect.left + (i % 9 + 0.5f) * cell, rect.top + (i / 9 + 0.72f) * cell, paint)
+                paint.clearShadowLayer()
             }
-            paint.style = Paint.Style.STROKE; paint.strokeWidth = 3.dp.toFloat(); paint.color = 0xFF80CBC4.toInt()
-            canvas.drawCircle(rect.right, rect.bottom, 9.dp.toFloat(), paint); paint.style = Paint.Style.FILL
+            if (!floatMode) {
+                paint.style = Paint.Style.STROKE; paint.strokeWidth = 3.dp.toFloat(); paint.color = 0xFF80CBC4.toInt()
+                canvas.drawCircle(rect.right, rect.bottom, 9.dp.toFloat(), paint); paint.style = Paint.Style.FILL
+            }
         }
         override fun onTouchEvent(event: MotionEvent): Boolean {
             when (event.actionMasked) {
@@ -246,7 +274,7 @@ class ScanService : Service() {
                 detected[row * 9 + col] = text[0].digitToInt()
             }
             board = detected; selected = -1; updateSolution()
-            showGuide()
+            if (answer != null) { showAnswerOverlay(); showBubble() } else showGuide()
         }.addOnFailureListener { fail("Text recognition failed. Try again.") }
             .addOnCompleteListener { crop.recycle(); scanner.close() }
     }
@@ -263,7 +291,7 @@ class ScanService : Service() {
     }
     private fun fail(reason: String) { message = reason; showGuide() }
     override fun onDestroy() {
-        closeGuide(); hideBubble(); display?.release(); reader?.close(); projection?.stop(); super.onDestroy()
+        closeGuide(); hideAnswerOverlay(); hideBubble(); display?.release(); reader?.close(); projection?.stop(); super.onDestroy()
     }
     private val Int.dp get() = (this * resources.displayMetrics.density).toInt()
 }
