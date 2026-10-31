@@ -14,3 +14,8 @@ Run `gradle testDebugUnitTest assembleDebug` with JDK 17, Android SDK 35, and Gr
 
 ## Design notes
 The foreground service owns a user-visible floating bubble and a movable, resizable nine-by-nine grid. For each scan it hides its own overlay before taking one MediaProjection frame, runs on-device ML Kit Latin OCR, maps digit bounding-box centers to cells, and uses a minimum-remaining-values backtracking solver. No Accessibility service or hidden permissions are used. Android may restrict capture of protected/secure content.
+
+## Solver and difficulty
+The solver does not assume a difficulty setting or rely on a clue-count-to-level mapping. It validates each row, column and 3×3 box; represents candidates with bit masks; selects the cell with the fewest legal values (MRV); and searches until it finds either two solutions or exhausts the possibilities. It displays answers only for a unique solution. This works for standard 9×9 puzzles at any difficulty, including puzzles labelled Extreme. Variant rules (diagonal Sudoku, killer cages, etc.) are **not** supported.
+
+Algorithm reference: Peter Norvig, [Solving Every Sudoku Puzzle](https://www.norvig.com/sudoku.html), particularly constraint propagation and MRV search. The OCR stage scans only the user-aligned square, avoiding surrounding scores, timers, and advertisements.

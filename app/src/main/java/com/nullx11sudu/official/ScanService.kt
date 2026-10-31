@@ -196,6 +196,11 @@ class ScanService : Service() {
                 val width = metrics.widthPixels; val height = metrics.heightPixels
                 val density = metrics.densityDpi
                 val imageReader = reader ?: ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2).also { reader = it }
+                // Discard any queued frames from the previous scan while the overlay was visible.
+                while (true) {
+                    val stale = imageReader.acquireLatestImage() ?: break
+                    stale.close()
+                }
                 var received = false
                 imageReader.setOnImageAvailableListener({ source ->
                     val image = source.acquireLatestImage() ?: return@setOnImageAvailableListener
@@ -215,27 +220,35 @@ class ScanService : Service() {
         }, 350)
     }
     private fun recognize(bitmap: Bitmap, selection: RectF, viewWidth: Int, viewHeight: Int) {
+        // OCR only the selected puzzle, not timers, scores, notes, ads or controls nearby.
+        // The overlay may have a different viewport from the captured display (status/navigation bars).
+        val dx = (bitmap.width - viewWidth) / 2f
+        val dy = (bitmap.height - viewHeight) / 2f
+        val bounds = RectF(selection).apply { offset(dx, dy) }
+        val left = floor(bounds.left).toInt().coerceIn(0, bitmap.width - 1)
+        val top = floor(bounds.top).toInt().coerceIn(0, bitmap.height - 1)
+        val right = ceil(bounds.right).toInt().coerceIn(left + 1, bitmap.width)
+        val bottom = ceil(bounds.bottom).toInt().coerceIn(top + 1, bitmap.height)
+        val crop = Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
+        bitmap.recycle()
         val scanner = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-        scanner.process(InputImage.fromBitmap(bitmap, 0)).addOnSuccessListener { result ->
+        scanner.process(InputImage.fromBitmap(crop, 0)).addOnSuccessListener { result ->
             val detected = IntArray(81)
-            // Overlay coordinates may omit the status bar. Align by the difference in displayed heights.
-            val dx = (bitmap.width - viewWidth) / 2f
-            val dy = (bitmap.height - viewHeight) / 2f
-            val rect = RectF(selection).apply { offset(dx, dy) }
+            val cellWidth = crop.width / 9f; val cellHeight = crop.height / 9f
             for (block in result.textBlocks) for (line in block.lines) for (element in line.elements) {
                 val text = element.text.trim()
-                val bounds = element.boundingBox ?: continue
+                val box = element.boundingBox ?: continue
                 if (text.length != 1 || text[0] !in '1'..'9') continue
-                val x = bounds.exactCenterX(); val y = bounds.exactCenterY()
-                if (!rect.contains(x, y)) continue
-                val col = ((x - rect.left) / rect.width() * 9).toInt().coerceIn(0, 8)
-                val row = ((y - rect.top) / rect.height() * 9).toInt().coerceIn(0, 8)
+                val col = (box.exactCenterX() / cellWidth).toInt().coerceIn(0, 8)
+                val row = (box.exactCenterY() / cellHeight).toInt().coerceIn(0, 8)
+                // Reject OCR spanning a grid line: it is unlikely to be a single clue.
+                if (box.width() > cellWidth * 0.85f || box.height() > cellHeight * 0.85f) continue
                 detected[row * 9 + col] = text[0].digitToInt()
             }
             board = detected; selected = -1; updateSolution()
             showGuide()
         }.addOnFailureListener { fail("Text recognition failed. Try again.") }
-            .addOnCompleteListener { bitmap.recycle(); scanner.close() }
+            .addOnCompleteListener { crop.recycle(); scanner.close() }
     }
     private fun updateSolution() {
         val clues = board.count { it != 0 }
