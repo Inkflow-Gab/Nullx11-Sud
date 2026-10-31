@@ -230,7 +230,7 @@ class ScanService : Service() {
         val right = ceil(bounds.right).toInt().coerceIn(left + 1, bitmap.width)
         val bottom = ceil(bounds.bottom).toInt().coerceIn(top + 1, bitmap.height)
         val crop = Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
-        bitmap.recycle()
+        if (crop !== bitmap) bitmap.recycle()
         val scanner = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
         scanner.process(InputImage.fromBitmap(crop, 0)).addOnSuccessListener { result ->
             val detected = IntArray(81)
