@@ -34,7 +34,7 @@ object Sudoku {
         var first: IntArray? = null
         var count = 0
         fun recurse() {
-            if (count >= limit) return
+            if (count >= limit || Thread.currentThread().isInterrupted) return
             var chosen = -1; var choices = 0; var minimum = 10
             for (i in board.indices) if (board[i] == 0) {
                 val mask = 0x3FE and (rows[i / 9] or cols[i % 9] or boxes[box(i)]).inv()

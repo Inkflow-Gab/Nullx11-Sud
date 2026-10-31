@@ -14,9 +14,12 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlin.math.*
+import java.util.concurrent.Executors
 
 class ScanService : Service() {
     private val handler = Handler(Looper.getMainLooper())
+    private val solverWorker = Executors.newSingleThreadExecutor()
+    private var solveGeneration = 0
     private lateinit var wm: WindowManager
     private var projection: MediaProjection? = null
     private var bubble: View? = null
@@ -107,10 +110,13 @@ class ScanService : Service() {
         val actions = LinearLayout(this)
         fun action(label: String, click: () -> Unit) { actions.addView(Button(this).apply { text = label; textSize = 12f; setOnClickListener { click() } }, LinearLayout.LayoutParams(0, -2, 1f)) }
         action("Scan") { message = "Scanning…"; info.text = message; capture() }
-        action("Clear") { board = IntArray(81); answer = null; message = "Cleared. Scan again."; info.text = message; view.invalidate() }
+        action("Clear") {
+            solveGeneration++; board = IntArray(81); answer = null; selected = -1
+            message = "Cleared. Align and scan a puzzle."; info.text = message; view.invalidate()
+        }
         action("Float") {
             if (answer != null) { closeGuide(); showAnswerOverlay(); showBubble() }
-            else { message = "Correct the clues or rescan before floating an answer."; info.text = message }
+            else { message = "No verified solution yet. Correct the clues or rescan."; info.text = message }
         }
         controls.addView(actions)
         val digits = LinearLayout(this)
@@ -158,7 +164,8 @@ class ScanService : Service() {
             val rect = boardRect(width, height); val cell = rect.width() / 9
             paint.style = Paint.Style.FILL
             if (!floatMode) {
-                paint.color = 0xDD10191B.toInt(); canvas.drawRect(rect, paint)
+                // Keep the game visible behind OCR clues so misreads are easy to spot.
+                paint.color = 0x9910191B.toInt(); canvas.drawRect(rect, paint)
             }
             if (!floatMode) for (i in 0..9) {
                 paint.color = if (i % 3 == 0) 0xFF80CBC4.toInt() else 0x667EAEA9
@@ -274,23 +281,37 @@ class ScanService : Service() {
                 detected[row * 9 + col] = text[0].digitToInt()
             }
             board = detected; selected = -1; updateSolution()
-            if (answer != null) { showAnswerOverlay(); showBubble() } else showGuide()
+            // Never auto-float a result: unique for OCR data does not prove OCR was correct.
+            showGuide()
         }.addOnFailureListener { fail("Text recognition failed. Try again.") }
             .addOnCompleteListener { crop.recycle(); scanner.close() }
     }
     private fun updateSolution() {
-        val clues = board.count { it != 0 }
-        val result = if (clues < 17) Sudoku.Result.Ambiguous else Sudoku.analyze(board)
-        answer = (result as? Sudoku.Result.Unique)?.board
-        message = when (result) {
-            is Sudoku.Result.Unique -> "$clues clues. Unique solution in teal; verify white clues."
-            Sudoku.Result.Ambiguous -> "$clues clues: multiple solutions. Correct a clue or rescan."
-            Sudoku.Result.Invalid -> "$clues clues: conflicting or unsolvable. Correct a clue or rescan."
-        }
+        val version = ++solveGeneration
+        val snapshot = board.clone()
+        answer = null
+        message = "Checking ${snapshot.count { it != 0 }} clues and solution uniqueness…"
         infoLabel?.text = message
+        guide?.invalidate()
+        solverWorker.execute {
+            val result = Sudoku.analyze(snapshot)
+            handler.post {
+                if (version != solveGeneration || projection == null) return@post
+                answer = (result as? Sudoku.Result.Unique)?.board
+                val clues = snapshot.count { it != 0 }
+                message = when (result) {
+                    is Sudoku.Result.Unique -> "$clues clues • Unique solution. Compare white clues to the game, correct any errors, then tap Float."
+                    Sudoku.Result.Ambiguous -> "$clues clues • More than one solution. Fix missed clues or rescan; no answer will float."
+                    Sudoku.Result.Invalid -> "$clues clues • Contradiction or no solution. Fix white clues or rescan."
+                }
+                infoLabel?.text = message
+                guide?.invalidate()
+            }
+        }
     }
     private fun fail(reason: String) { message = reason; showGuide() }
     override fun onDestroy() {
+        solveGeneration++; solverWorker.shutdownNow()
         closeGuide(); hideAnswerOverlay(); hideBubble(); display?.release(); reader?.close(); projection?.stop(); super.onDestroy()
     }
     private val Int.dp get() = (this * resources.displayMetrics.density).toInt()
