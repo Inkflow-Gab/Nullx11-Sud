@@ -27,6 +27,8 @@ class ScanService : Service() {
     private val channel = "capture"
     private var board = IntArray(81)
     private var answer: IntArray? = null
+    private var selected = -1
+    private var infoLabel: TextView? = null
     private var message = "Move the grid over the puzzle, resize it, then scan."
     private var size = 0.82f
     private var centerX = 0.5f
@@ -91,6 +93,7 @@ class ScanService : Service() {
         }
         val info = TextView(this).apply { text = message; setTextColor(Color.WHITE); textSize = 14f }
         controls.addView(info)
+        infoLabel = info
         controls.addView(SeekBar(this).apply {
             max = 75; progress = ((size - 0.25f) * 100).toInt()
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -105,10 +108,25 @@ class ScanService : Service() {
         action("Clear") { board = IntArray(81); answer = null; message = "Cleared. Scan again."; info.text = message; view.invalidate() }
         action("Hide") { closeGuide(); showBubble() }
         controls.addView(actions)
+        val digits = LinearLayout(this)
+        for (digit in 0..9) {
+            digits.addView(TextView(this).apply {
+                text = if (digit == 0) "×" else digit.toString()
+                textSize = 20f; gravity = Gravity.CENTER; setTextColor(0xFF80CBC4.toInt())
+                setOnClickListener {
+                    if (selected >= 0) {
+                        board[selected] = digit
+                        updateSolution()
+                        view.invalidate()
+                    } else { message = "Tap a cell to select it first."; info.text = message }
+                }
+            }, LinearLayout.LayoutParams(0, 48.dp, 1f))
+        }
+        controls.addView(digits)
         panel = controls
         wm.addView(controls, params(-1, -2).apply { gravity = Gravity.BOTTOM })
     }
-    private fun closeGuide() { panel?.let { wm.removeView(it) }; panel = null; guide?.let { wm.removeView(it) }; guide = null }
+    private fun closeGuide() { infoLabel = null; panel?.let { wm.removeView(it) }; panel = null; guide?.let { wm.removeView(it) }; guide = null }
     private fun boardRect(w: Int, h: Int): RectF {
         val side = min(w, h) * size
         val cx = centerX * w; val cy = centerY * h
@@ -116,7 +134,7 @@ class ScanService : Service() {
     }
     private inner class BoardView(context: Context) : View(context) {
         private val paint = Paint(3)
-        private var downX = 0f; private var downY = 0f
+        private var downX = 0f; private var downY = 0f; private var dragging = false
         override fun onDraw(canvas: Canvas) {
             canvas.drawColor(0x44000000)
             val rect = boardRect(width, height); val cell = rect.width() / 9
@@ -128,6 +146,11 @@ class ScanService : Service() {
                 canvas.drawLine(rect.left, rect.top + i * cell, rect.right, rect.top + i * cell, paint)
             }
             paint.textAlign = Paint.Align.CENTER; paint.textSize = cell * 0.65f
+            if (selected >= 0) {
+                paint.color = 0x664DB6AC
+                canvas.drawRect(rect.left + (selected % 9) * cell, rect.top + (selected / 9) * cell,
+                    rect.left + (selected % 9 + 1) * cell, rect.top + (selected / 9 + 1) * cell, paint)
+            }
             for (i in 0 until 81) {
                 val v = if (board[i] != 0) board[i] else answer?.get(i) ?: 0
                 if (v == 0) continue
@@ -139,11 +162,24 @@ class ScanService : Service() {
         }
         override fun onTouchEvent(event: MotionEvent): Boolean {
             when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> { downX = event.x; downY = event.y; return true }
+                MotionEvent.ACTION_DOWN -> { downX = event.x; downY = event.y; dragging = false; return true }
                 MotionEvent.ACTION_MOVE -> {
+                    if (hypot(event.x - downX, event.y - downY) < 5.dp) return true
+                    dragging = true
                     centerX = (centerX + (event.x - downX) / width).coerceIn(0f, 1f)
                     centerY = (centerY + (event.y - downY) / height).coerceIn(0f, 1f)
                     downX = event.x; downY = event.y; invalidate(); return true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (!dragging) {
+                        val rect = boardRect(width, height)
+                        if (rect.contains(event.x, event.y)) {
+                            val col = ((event.x - rect.left) / rect.width() * 9).toInt().coerceIn(0, 8)
+                            val row = ((event.y - rect.top) / rect.height() * 9).toInt().coerceIn(0, 8)
+                            selected = row * 9 + col; invalidate()
+                        }
+                    }
+                    return true
                 }
             }; return true
         }
@@ -196,12 +232,21 @@ class ScanService : Service() {
                 val row = ((y - rect.top) / rect.height() * 9).toInt().coerceIn(0, 8)
                 detected[row * 9 + col] = text[0].digitToInt()
             }
-            board = detected; answer = Sudoku.solve(board);
-            val clues = board.count { it != 0 }
-            message = if (clues < 12) "Only $clues clues found. Align the grid and scan again." else if (answer == null) "Clues conflict or puzzle is unsolvable. Adjust the grid and rescan." else "$clues clues found. Teal digits fill empty cells. Check OCR before using."
+            board = detected; selected = -1; updateSolution()
             showGuide()
         }.addOnFailureListener { fail("Text recognition failed. Try again.") }
             .addOnCompleteListener { bitmap.recycle(); scanner.close() }
+    }
+    private fun updateSolution() {
+        val clues = board.count { it != 0 }
+        val result = if (clues < 17) Sudoku.Result.Ambiguous else Sudoku.analyze(board)
+        answer = (result as? Sudoku.Result.Unique)?.board
+        message = when (result) {
+            is Sudoku.Result.Unique -> "$clues clues. Unique solution in teal; verify white clues."
+            Sudoku.Result.Ambiguous -> "$clues clues: multiple solutions. Correct a clue or rescan."
+            Sudoku.Result.Invalid -> "$clues clues: conflicting or unsolvable. Correct a clue or rescan."
+        }
+        infoLabel?.text = message
     }
     private fun fail(reason: String) { message = reason; showGuide() }
     override fun onDestroy() {
